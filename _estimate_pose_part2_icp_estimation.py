@@ -270,12 +270,7 @@ def visualize_icp_alignment(source_pcd_transformed_model, instance_pcd_observed,
 def visualize_transformed_model_in_scene(scene_pcd, target_model_geometry, transform, window_name="Transformed Model in Scene"):
     """
     Visualize the transformed model in the original scene.
-    
-    Args:
-        scene_pcd: Open3D point cloud of the original scene
-        target_model_geometry: Open3D geometry (point cloud or mesh) of the target model
-        transform: 4x4 transformation matrix
-        window_name: Name of the visualization window
+    模板始终显示为纯色（如红色），不带纹理，便于区分。
     """
     # Create a copy of the scene point cloud to avoid modifying the original
     scene_vis = o3d.geometry.PointCloud(scene_pcd)
@@ -290,24 +285,19 @@ def visualize_transformed_model_in_scene(scene_pcd, target_model_geometry, trans
     model_vis.transform(transform)
     
     # Set colors for visualization
-    if not scene_vis.has_colors():
+    if not scene_vis.has_colors(): 
         print("警告：原始场景点云没有颜色信息")
         scene_vis.paint_uniform_color([0.7, 0.7, 0.7])  # 灰色
     else:
         print("使用原始场景点云的颜色信息")
-    
+
+    # 模板始终显示为红色，不带纹理
     if isinstance(model_vis, o3d.geometry.TriangleMesh):
-        if not model_vis.has_vertex_colors():
-            print("警告：目标模型网格没有颜色信息")
-            model_vis.paint_uniform_color([1, 0, 0])  # 红色
-        else:
-            print("使用目标模型网格的颜色信息")
+        print("模板以红色显示（无纹理）")
+        model_vis.paint_uniform_color([1, 0, 0])  # 红色
     else:
-        if not model_vis.has_colors():
-            print("警告：目标模型点云没有颜色信息")
-            model_vis.paint_uniform_color([1, 0, 0])  # 红色
-        else:
-            print("使用目标模型点云的颜色信息")
+        print("模板以红色显示（无纹理）")
+        model_vis.paint_uniform_color([1, 0, 0])  # 红色
     
     # Create visualization window
     vis = o3d.visualization.Visualizer()

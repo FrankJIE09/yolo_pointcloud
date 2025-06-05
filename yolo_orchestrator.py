@@ -24,13 +24,18 @@ except ImportError as e:
 # --- USER CONFIGURATIONS ---
 YOLO_MODEL_PATH = 'yolov8m.pt'  # Path to your YOLO model (e.g., yolov8n.pt, yolov8s.pt, or custom_model.pt)
 # List of target class names that your YOLO model can detect AND you want to process
-YOLO_TARGET_CLASS_NAMES = ['truck'] # IMPORTANT: Adjust to your model's classes and your targets
+YOLO_TARGET_CLASS_NAMES = ['truck','boat'] # IMPORTANT: Adjust to your model's classes and your targets
 YOLO_CONF_THRESHOLD = 0.3  # Confidence threshold for YOLO detections
+
+# 新增参数：是否优先使用PCD模板（即使STL存在）
+USE_PCD_TEMPLATE_IF_AVAILABLE = True  # <<< 设为True则优先PCD，否则优先STL
 
 # IMPORTANT: Map detected class names to their corresponding CAD model files for Part 1
 # The keys MUST match the names in YOLO_TARGET_CLASS_NAMES and your YOLO model output
 CLASS_TO_MODEL_FILE_MAP = {
     'truck': 'lixun.STL',       # Replace with actual path
+    'boat': 'lixun.STL',  # Replace with actual path
+
 }
 
 # PART1_SCRIPT_NAME = "_estimate_pose_part1_pytorch_coarse_align.py" # No longer calling Part 1
@@ -38,7 +43,8 @@ PART2_SCRIPT_NAME = "_estimate_pose_part2_icp_estimation.py"
 CONFIG_YAML_FILE = "pose_estimation_config.yaml"
 
 ORCHESTRATOR_BASE_OUTPUT_DIR = "./yolo_orchestrator_direct_to_part2_runs"
-MODEL_SAMPLE_POINTS_FOR_PART2 = 2048 # Points to sample from CAD model for Part2's target
+MODEL_SAMPLE_POINTS_FOR_PART2 = 2048*5 # Points to sample from CAD model for Part2's target
+PCD_CLASS_TEMPLATES_DIR = "./pcd_class_templates" # Directory to store generated PCD templates
 # ---
 
 # --- New Helper Function for Median ROI Depth ---
@@ -223,9 +229,10 @@ def crop_point_cloud_from_roi_and_depth_range(
     return cropped_pcd_o3d
 # --- End modified cropping function ---
 
-def prepare_intermediate_data_for_part2(base_dir, object_pcd_o3d, cad_model_path, orchestrator_args_dict, full_scene_pcd_o3d):
+def prepare_intermediate_data_for_part2(base_dir, object_pcd_o3d, model_input_path, is_pcd_template, orchestrator_args_dict, full_scene_pcd_o3d):
     """
-    Prepares the directory and files that Part 2 expects, without running Part 1.
+    Prepares the directory and files that Part 2 expects.
+    Accepts either a CAD model path or a PCD template path.
     Saves: 
     - args.json (from orchestrator_args_dict)
     - scene_observed_for_icp.pcd (the cropped object_pcd_o3d)
@@ -284,71 +291,88 @@ def prepare_intermediate_data_for_part2(base_dir, object_pcd_o3d, cad_model_path
     except Exception as e:
         print(f"  ERROR saving instance_0_centroid.npy: {e}"); return None
 
-    # 3. Load, process, and save target CAD model files
-    if not os.path.exists(cad_model_path):
-        print(f"  ERROR: CAD model file for Part 2 target not found: {cad_model_path}"); return None
-    
+    # 3. Load, process, and save target model files (from CAD or PCD template)
     target_pcd_original_model_scale_o3d = o3d.geometry.PointCloud()
+    target_pcd_for_centering_and_icp = o3d.geometry.PointCloud()
+
     try:
-        temp_mesh = o3d.io.read_triangle_mesh(cad_model_path)
-        if temp_mesh.has_vertices():
-            target_pcd_original_model_scale_o3d = temp_mesh.sample_points_uniformly(MODEL_SAMPLE_POINTS_FOR_PART2)
-        else: # Fallback if it's a PCD or other non-mesh format that sample_points_uniformly can't handle directly
-            target_pcd_original_model_scale_o3d = o3d.io.read_point_cloud(cad_model_path)
-            # If it was a PCD and we want to ensure a specific number of points, resample if necessary
-            if len(target_pcd_original_model_scale_o3d.points) != MODEL_SAMPLE_POINTS_FOR_PART2 and len(target_pcd_original_model_scale_o3d.points) > 0 :
-                 print(f"  Resampling loaded target PCD from {len(target_pcd_original_model_scale_o3d.points)} to {MODEL_SAMPLE_POINTS_FOR_PART2} points for consistency.")
-                 target_pcd_original_model_scale_o3d = target_pcd_original_model_scale_o3d.farthest_point_down_sample(MODEL_SAMPLE_POINTS_FOR_PART2)
-    
+        if not model_input_path or not os.path.exists(model_input_path):
+            print(f"  ERROR: Target model input file not found or not specified: {model_input_path}"); return None
+
+        if is_pcd_template:
+            print(f"  Processing PCD template: {model_input_path}")
+            target_pcd_from_input = o3d.io.read_point_cloud(model_input_path)
+            if not target_pcd_from_input.has_points():
+                raise ValueError(f"PCD template {model_input_path} is empty.")
+            target_pcd_original_model_scale_o3d = target_pcd_from_input # This is the original scale
+            # For the ICP target, we will sample it to MODEL_SAMPLE_POINTS_FOR_PART2
+            if len(target_pcd_from_input.points) >= MODEL_SAMPLE_POINTS_FOR_PART2:
+                print(f"  Sampling PCD template from {len(target_pcd_from_input.points)} to {MODEL_SAMPLE_POINTS_FOR_PART2} points for centered ICP target.")
+                target_pcd_for_centering_and_icp = target_pcd_from_input.farthest_point_down_sample(MODEL_SAMPLE_POINTS_FOR_PART2)
+            else:
+                print(f"  Warning: PCD template has less than {MODEL_SAMPLE_POINTS_FOR_PART2} points (has {len(target_pcd_from_input.points)}). Using all available for centered ICP target.")
+                target_pcd_for_centering_and_icp = o3d.geometry.PointCloud(target_pcd_from_input) # Use a copy
+        else: # Process CAD model (e.g., STL)
+            print(f"  Processing CAD model: {model_input_path}")
+            temp_mesh = o3d.io.read_triangle_mesh(model_input_path)
+            if not temp_mesh.has_vertices():
+                # Try to load as point cloud if mesh reading fails (e.g. if a .pcd was accidentally passed as CAD)
+                print(f"  Warning: Could not read {model_input_path} as mesh. Attempting to read as point cloud.")
+                pcd_fallback = o3d.io.read_point_cloud(model_input_path)
+                if not pcd_fallback.has_points():
+                    raise ValueError(f"CAD model {model_input_path} could not be read as mesh or point cloud, or is empty.")
+                # If loaded as PCD, this becomes the base for original_model_scale, then sample for ICP target
+                target_pcd_original_model_scale_o3d = pcd_fallback
+                if len(pcd_fallback.points) >= MODEL_SAMPLE_POINTS_FOR_PART2:
+                    target_pcd_for_centering_and_icp = pcd_fallback.farthest_point_down_sample(MODEL_SAMPLE_POINTS_FOR_PART2)
+                else:
+                    target_pcd_for_centering_and_icp = o3d.geometry.PointCloud(pcd_fallback)
+            else:
+                # Successfully read as mesh, sample for original scale and ICP target
+                if MODEL_SAMPLE_POINTS_FOR_PART2 > 0:
+                    target_pcd_original_model_scale_o3d = temp_mesh.sample_points_uniformly(MODEL_SAMPLE_POINTS_FOR_PART2)
+                    # Since sample_points_uniformly gives the desired number, use it directly for ICP target as well
+                    target_pcd_for_centering_and_icp = o3d.geometry.PointCloud(target_pcd_original_model_scale_o3d)
+                else: # Sample all points if MODEL_SAMPLE_POINTS_FOR_PART2 is 0 or negative (not typical)
+                    target_pcd_original_model_scale_o3d = temp_mesh.sample_points_poisson_disk(number_of_points=len(temp_mesh.vertices), init_factor=5)
+                    target_pcd_for_centering_and_icp = o3d.geometry.PointCloud(target_pcd_original_model_scale_o3d)
+
         if not target_pcd_original_model_scale_o3d.has_points():
-            raise ValueError("CAD model has no points after loading/sampling for Part 2 target.")
-        
+            raise ValueError("Target model (original scale) has no points after loading/sampling.")
+        if not target_pcd_for_centering_and_icp.has_points():
+            raise ValueError("Target model (for ICP centering) has no points after processing.")
+
         target_centroid_original_np = target_pcd_original_model_scale_o3d.get_center()
         
-        # Ensure the centered model FOR ICP has the specified number of points
-        target_pcd_for_centering_and_icp = None
-        if len(target_pcd_original_model_scale_o3d.points) == MODEL_SAMPLE_POINTS_FOR_PART2 and temp_mesh.has_vertices(): # Mesh path was okay
-             target_pcd_for_centering_and_icp = o3d.geometry.PointCloud(target_pcd_original_model_scale_o3d) # Copy for centering
-        elif len(target_pcd_original_model_scale_o3d.points) == 0:
-             raise ValueError("Target PCD is empty before centering and sampling.")
-        else: # Was a PCD or sampling didn't give exact number, ensure target_pcd_centered_for_icp_o3d has correct count
-            # Re-sample from the original scale PCD to get the target number of points for the centered one
-            if len(target_pcd_original_model_scale_o3d.points) >= MODEL_SAMPLE_POINTS_FOR_PART2:
-                print(f"  Sampling original target scale PCD from {len(target_pcd_original_model_scale_o3d.points)} to {MODEL_SAMPLE_POINTS_FOR_PART2} points for the centered ICP target.")
-                # Farthest point sampling is good for uniform coverage
-                target_pcd_for_centering_and_icp = target_pcd_original_model_scale_o3d.farthest_point_down_sample(MODEL_SAMPLE_POINTS_FOR_PART2)
-            else: # Less points than required, use all of them
-                print(f"  Warning: Original target scale PCD has less than {MODEL_SAMPLE_POINTS_FOR_PART2} points (has {len(target_pcd_original_model_scale_o3d.points)}). Using all available for centered ICP target.")
-                target_pcd_for_centering_and_icp = o3d.geometry.PointCloud(target_pcd_original_model_scale_o3d) # Copy
-        
-        if target_pcd_for_centering_and_icp is None or not target_pcd_for_centering_and_icp.has_points():
-             raise ValueError("Target PCD for centering and ICP is empty after sampling attempt.")
-
         target_pcd_centered_for_icp_o3d = o3d.geometry.PointCloud(target_pcd_for_centering_and_icp) # Make a copy to translate
-        target_pcd_centered_for_icp_o3d.translate(-target_pcd_centered_for_icp_o3d.get_center()) # Center the sampled one
+        target_pcd_centered_for_icp_o3d.translate(-target_pcd_centered_for_icp_o3d.get_center()) # Center the (potentially resampled) point cloud
 
         path_common_target_orig_scale = os.path.join(base_dir, "common_target_model_original_scale.pcd")
         path_common_target_centroid = os.path.join(base_dir, "common_target_centroid_original_model_scale.npy")
         path_model_file_txt = os.path.join(base_dir, "model_file_path.txt")
         path_target_centered_for_icp = os.path.join(base_dir, "common_target_model_centered.pcd")
 
-        # 保存目标模型时保留颜色信息
+        # 保存目标模型时保留颜色信息 (if any from PCD template)
         if target_pcd_original_model_scale_o3d.has_colors():
-            print(f"  Saving target model with colors to: {path_common_target_orig_scale}")
+            print(f"  Saving target model (original scale) with colors to: {path_common_target_orig_scale}")
+        else:
+            print(f"  Saving target model (original scale) without colors to: {path_common_target_orig_scale}")
         o3d.io.write_point_cloud(path_common_target_orig_scale, target_pcd_original_model_scale_o3d)
         
         np.save(path_common_target_centroid, target_centroid_original_np)
-        with open(path_model_file_txt, 'w') as f_model: f_model.write(cad_model_path)
+        with open(path_model_file_txt, 'w') as f_model: f_model.write(model_input_path) # Save the actual input path
         
-        # 保存居中的目标模型时保留颜色信息
+        # 保存居中的目标模型时保留颜色信息 (if any from PCD template that carried over)
         if target_pcd_centered_for_icp_o3d.has_colors():
-            print(f"  Saving centered target model with colors to: {path_target_centered_for_icp}")
+            print(f"  Saving centered target model (for ICP) with colors to: {path_target_centered_for_icp}")
+        else:
+            print(f"  Saving centered target model (for ICP) without colors to: {path_target_centered_for_icp}")
         o3d.io.write_point_cloud(path_target_centered_for_icp, target_pcd_centered_for_icp_o3d)
         
         print(f"  Saved target model files (original, centroid, centered for ICP as common_target_model_centered.pcd) to {base_dir}")
 
-    except Exception as e_load_cad:
-        print(f"  ERROR processing CAD model '{cad_model_path}' for Part 2: {e_load_cad}"); return None
+    except Exception as e_load_target:
+        print(f"  ERROR processing target model from '{model_input_path}': {e_load_target}"); return None
 
     # 4. Save initial_transform_for_icp.npy (identity matrix as Part 1 is skipped)
     path_instance_0_pca_transform = os.path.join(base_dir, "instance_0_pca_transform.npy")
@@ -394,7 +418,7 @@ def main_yolo_orchestrator():
         if not available_sns:
             print("ERROR: No Orbbec devices found. Please check connection."); return
         print(f"Found Orbbec devices: {available_sns}. Using first one: {available_sns[0]}") # Use index 0
-        camera_instance = OrbbecCamera(available_sns[0]) # Use the first available SN
+        camera_instance = OrbbecCamera("CP1Z842000DL") # Use the first available SN
         camera_instance.start_stream(depth_stream=True, color_stream=True, use_alignment=True, enable_sync=True)
         if camera_instance.param is None or camera_instance.param.rgb_intrinsic is None:
             raise RuntimeError("Failed to get RGB camera intrinsics from camera after starting stream.")
@@ -418,6 +442,7 @@ def main_yolo_orchestrator():
             return
 
         os.makedirs(ORCHESTRATOR_BASE_OUTPUT_DIR, exist_ok=True)
+        os.makedirs(PCD_CLASS_TEMPLATES_DIR, exist_ok=True) # <<< Ensure PCD templates directory exists
         # part1_script_path = find_script_path(PART1_SCRIPT_NAME) # No longer needed
         part2_script_path = find_script_path(PART2_SCRIPT_NAME)
         config_yaml_path = find_script_path(CONFIG_YAML_FILE)
@@ -557,12 +582,15 @@ def main_yolo_orchestrator():
                                             elif colors_np.dtype in [np.float32, np.float64]:
                                                 print(f"DEBUG: Color data type is {colors_np.dtype}. Checking if in [0,1] range.")
                                                 if np.any(colors_np < 0.0) or np.any(colors_np > 1.0):
-                                                    print("DEBUG: Color data not in [0,1] range. Clipping.")
-                                                    colors_np_clipped = np.clip(colors_np, 0.0, 1.0)
-                                                    full_pcd_o3d.colors = o3d.utility.Vector3dVector(colors_np_clipped)
-                                                    print(f"DEBUG: Colors clipped. New min: {np.min(colors_np_clipped)}, max: {np.max(colors_np_clipped)}.")
+                                                    # Values are float and outside [0,1], assume they are in 0-255 range.
+                                                    print("DEBUG: Color data is float and appears to be in 0-255 range. Normalizing to [0,1].")
+                                                    colors_np_normalized = colors_np / 255.0
+                                                    # Clip after division to ensure strict [0,1] due to potential precision issues or values outside 0-255
+                                                    colors_np_normalized = np.clip(colors_np_normalized, 0.0, 1.0)
+                                                    full_pcd_o3d.colors = o3d.utility.Vector3dVector(colors_np_normalized)
+                                                    print(f"DEBUG: Colors normalized and clipped. New min: {np.min(colors_np_normalized) if colors_np_normalized.size > 0 else 'N/A'}, max: {np.max(colors_np_normalized) if colors_np_normalized.size > 0 else 'N/A'}.")
                                                 else:
-                                                    print("DEBUG: Color data already in [0,1] range. Assigning directly.")
+                                                    print("DEBUG: Color data is float and already in [0,1] range. Assigning directly.")
                                                     full_pcd_o3d.colors = o3d.utility.Vector3dVector(colors_np)
                                             else:
                                                 print(f"DEBUG: Unexpected color dtype: {colors_np.dtype}. Colors will not be assigned.")
@@ -614,14 +642,33 @@ def main_yolo_orchestrator():
                                     current_run_output_dir = os.path.join(ORCHESTRATOR_BASE_OUTPUT_DIR, f"run_{class_name}_{timestamp}")
                                     intermediate_dir_for_part2 = os.path.join(current_run_output_dir, "intermediate_for_part2") 
                                     
-                                    target_cad_model_file = CLASS_TO_MODEL_FILE_MAP.get(class_name)
-                                    if not target_cad_model_file or not os.path.exists(target_cad_model_file):
-                                        print(f"  ERROR: CAD Model for class '{class_name}' not found. Path: '{target_cad_model_file}'. Skipping."); continue
+                                    # --- Determine model path (CAD or PCD template) ---
+                                    target_cad_model_file_path = CLASS_TO_MODEL_FILE_MAP.get(class_name)
+                                    model_path_for_part2 = None
+                                    is_pcd_template = False
+
+                                    # 新逻辑：如果USE_PCD_TEMPLATE_IF_AVAILABLE为True，优先PCD模板
+                                    pcd_template_file_path = os.path.join(PCD_CLASS_TEMPLATES_DIR, f"{class_name}_template.pcd")
+                                    if USE_PCD_TEMPLATE_IF_AVAILABLE and os.path.exists(pcd_template_file_path):
+                                        model_path_for_part2 = pcd_template_file_path
+                                        is_pcd_template = True
+                                        print(f"  INFO: USE_PCD_TEMPLATE_IF_AVAILABLE=True，优先使用PCD模板: {model_path_for_part2}")
+                                    elif target_cad_model_file_path and os.path.exists(target_cad_model_file_path):
+                                        model_path_for_part2 = target_cad_model_file_path
+                                        is_pcd_template = False
+                                        print(f"  INFO: 使用CAD模型: {model_path_for_part2}")
+                                    elif os.path.exists(pcd_template_file_path):
+                                        model_path_for_part2 = pcd_template_file_path
+                                        is_pcd_template = True
+                                        print(f"  INFO: 使用PCD模板: {model_path_for_part2}")
+                                    else:
+                                        print(f"  ERROR: 未找到CAD模型或PCD模板: {target_cad_model_file_path}, {pcd_template_file_path}，跳过该目标。")
+                                        continue # Skip to next detected object
+                                    # --- End model path determination ---
                                     
                                     # Prepare the intermediate directory for Part 2 manually
                                     print(f"DEBUG: About to call prepare_intermediate_data_for_part2.")
                                     print(f"  DEBUG: object_pcd_o3d_for_part2.has_colors(): {object_pcd_o3d.has_colors() if object_pcd_o3d else 'None'}")
-                                    # The full_scene_pcd_for_part2 is what gets saved as common_original_scene.pcd
                                     print(f"  DEBUG: full_scene_pcd_for_part2.has_colors(): {full_pcd_o3d.has_colors() if full_pcd_o3d else 'None'}") 
                                     if full_pcd_o3d and full_pcd_o3d.has_colors():
                                          print(f"    DEBUG: full_scene_pcd_for_part2 first 3 colors before prepare_intermediate: {np.asarray(full_pcd_o3d.colors)[:3]}")
@@ -629,7 +676,8 @@ def main_yolo_orchestrator():
                                     prepared_intermediate_path = prepare_intermediate_data_for_part2(
                                         intermediate_dir_for_part2,
                                         object_pcd_o3d,              # This is the cropped ROI point cloud
-                                        target_cad_model_file,
+                                        model_path_for_part2,        # Path to CAD or PCD template
+                                        is_pcd_template,             # Boolean flag
                                         orchestrator_args_for_part2_json,
                                         full_pcd_o3d                 # Pass the full scene PCD
                                     )

@@ -79,11 +79,59 @@ class OrbbecCamera:
             profile_list_depth = self.pipeline.get_stream_profile_list(OBSensorType.DEPTH_SENSOR)
             if profile_list_depth is None:
                 raise RuntimeError("Failed to get depth stream profile list.")
-            self.depth_profile = profile_list_depth.get_default_video_stream_profile()
-            if self.depth_profile is None:
-                raise RuntimeError("Failed to get default depth video stream profile.")
-            print(
-                f"Default Depth Profile: {self.depth_profile.get_width()}x{self.depth_profile.get_height()}@{self.depth_profile.get_fps()}fps {self.depth_profile.get_format()}")
+
+            # --- Try to find a higher resolution depth profile ---
+            selected_depth_profile = None
+            best_profile = None
+            highest_resolution = 0
+            target_width = 1280  # Desired width
+            target_height = 720 # Desired height
+
+            for i in range(profile_list_depth.get_count()):
+                profile = profile_list_depth.get_stream_profile_by_index(i)
+                if profile:
+                    video_profile = profile.as_video_stream_profile()
+                    if video_profile:
+                        current_resolution = video_profile.get_width() * video_profile.get_height()
+                        # print(f"DEBUG: Found depth profile: {video_profile.get_width()}x{video_profile.get_height()}@{video_profile.get_fps()}fps {video_profile.get_format()}")
+
+                        # Check for target resolution
+                        if video_profile.get_width() == target_width and video_profile.get_height() == target_height:
+                            # Prefer Y16 format if available at target resolution
+                            if video_profile.get_format() == OBFormat.Y16:
+                                selected_depth_profile = video_profile
+                                break 
+                            elif selected_depth_profile is None: # Take any format if Y16 not found yet for target
+                                selected_depth_profile = video_profile
+
+
+                        # Keep track of the highest resolution profile found so far
+                        if current_resolution > highest_resolution:
+                            highest_resolution = current_resolution
+                            best_profile = video_profile
+                        elif current_resolution == highest_resolution:
+                            # If resolutions are the same, prefer Y16 format
+                            if video_profile.get_format() == OBFormat.Y16 and (best_profile is None or best_profile.get_format() != OBFormat.Y16):
+                                best_profile = video_profile
+
+
+            if selected_depth_profile:
+                self.depth_profile = selected_depth_profile
+                print(f"Selected Target Depth Profile: {self.depth_profile.get_width()}x{self.depth_profile.get_height()}@{self.depth_profile.get_fps()}fps {self.depth_profile.get_format()}")
+            elif best_profile:
+                self.depth_profile = best_profile
+                print(f"Selected Highest Resolution Depth Profile: {self.depth_profile.get_width()}x{self.depth_profile.get_height()}@{self.depth_profile.get_fps()}fps {self.depth_profile.get_format()}")
+            else:
+                # Fallback to default if no profiles found or list is empty (should not happen if previous check passes)
+                self.depth_profile = profile_list_depth.get_default_video_stream_profile()
+                if self.depth_profile is None:
+                    raise RuntimeError("Failed to get any depth video stream profile.")
+                print(f"Fallback to Default Depth Profile: {self.depth_profile.get_width()}x{self.depth_profile.get_height()}@{self.depth_profile.get_fps()}fps {self.depth_profile.get_format()}")
+            
+            if self.depth_profile is None: # Should be caught by RuntimeError above, but as a safeguard
+                raise RuntimeError("Failed to select a depth video stream profile.")
+            # print( # Original print for default, now adapted
+            #    f"Selected Depth Profile: {self.depth_profile.get_width()}x{self.depth_profile.get_height()}@{self.depth_profile.get_fps()}fps {self.depth_profile.get_format()}")
         except OBError as e:
             raise RuntimeError(f"Error getting depth profiles: {e}")
 
