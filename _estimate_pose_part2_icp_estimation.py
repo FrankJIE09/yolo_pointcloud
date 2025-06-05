@@ -401,10 +401,23 @@ def main(cli_args_part2):
     
     effective_args = copy.deepcopy(args_from_part1) # Start with args from part1 (args.json)
     
-    # Override with Part 2's specific CLI/YAML settings for visualization and output
-    if cli_args_part2.visualize_pose is not None: effective_args.visualize_pose = cli_args_part2.visualize_pose
-    if cli_args_part2.visualize_pose_in_scene is not None: effective_args.visualize_pose_in_scene = cli_args_part2.visualize_pose_in_scene
-    if cli_args_part2.save_results is not None: effective_args.save_results = cli_args_part2.save_results
+    # Ensure critical Part 2 flags exist on effective_args, defaulting if not from args.json
+    if not hasattr(effective_args, 'visualize_pose'):
+        effective_args.visualize_pose = False
+    if not hasattr(effective_args, 'visualize_pose_in_scene'):
+        effective_args.visualize_pose_in_scene = False
+    if not hasattr(effective_args, 'save_results'):
+        effective_args.save_results = False
+    
+    # Override with Part 2's specific CLI/YAML settings if they are provided (not None)
+    if cli_args_part2.visualize_pose is not None:
+        effective_args.visualize_pose = cli_args_part2.visualize_pose
+        
+    if cli_args_part2.visualize_pose_in_scene is not None:
+        effective_args.visualize_pose_in_scene = cli_args_part2.visualize_pose_in_scene
+        
+    if cli_args_part2.save_results is not None:
+        effective_args.save_results = cli_args_part2.save_results
     
     if cli_args_part2.output_dir_part2 is not None: 
         effective_args.output_dir = cli_args_part2.output_dir_part2 
@@ -424,7 +437,7 @@ def main(cli_args_part2):
     path_common_target_centered_o3d = os.path.join(cli_args_part2.intermediate_dir, "common_target_model_centered.pcd")
     path_common_target_original_scale_o3d = os.path.join(cli_args_part2.intermediate_dir, "common_target_model_original_scale.pcd")
     path_common_target_centroid_np = os.path.join(cli_args_part2.intermediate_dir, "common_target_centroid_original_model_scale.npy")
-    path_common_original_scene_o3d = os.path.join(cli_args_part2.intermediate_dir, "common_original_scene.pcd")
+    path_common_original_scene = os.path.join(cli_args_part2.intermediate_dir, "common_original_scene.pcd")
     path_model_file_txt = os.path.join(cli_args_part2.intermediate_dir, "model_file_path.txt")
 
     try:
@@ -432,7 +445,26 @@ def main(cli_args_part2):
         target_pcd_model_centered_o3d = o3d.io.read_point_cloud(path_common_target_centered_o3d)
         target_pcd_original_model_scale_o3d = o3d.io.read_point_cloud(path_common_target_original_scale_o3d)
         target_centroid_original_model_scale_np = np.load(path_common_target_centroid_np)
-        original_scene_o3d_pcd = o3d.io.read_point_cloud(path_common_original_scene_o3d)
+        original_scene_pcd = None
+        if os.path.exists(path_common_original_scene):
+            try:
+                original_scene_pcd = o3d.io.read_point_cloud(path_common_original_scene)
+                print(f"DEBUG (Part 2): Loaded original_scene_pcd from {path_common_original_scene}")
+                if not original_scene_pcd.has_points():
+                    print("  WARNING (Part 2): Loaded original_scene_pcd has no points.")
+                    original_scene_pcd = None # Treat as not loaded if empty
+                else:
+                    print(f"  DEBUG (Part 2): original_scene_pcd has {len(original_scene_pcd.points)} points.")
+                    print(f"  DEBUG (Part 2): original_scene_pcd.has_colors(): {original_scene_pcd.has_colors()}")
+                    if original_scene_pcd.has_colors():
+                        print(f"  DEBUG (Part 2): First 3 color values of original_scene_pcd: {np.asarray(original_scene_pcd.colors)[:3]}")
+                    else:
+                        print("  DEBUG (Part 2): original_scene_pcd loaded WITHOUT colors.")
+            except Exception as e_load_scene:
+                print(f"  WARNING (Part 2): Could not load common_original_scene.pcd: {e_load_scene}")
+                original_scene_pcd = None
+        else:
+            print(f"  WARNING (Part 2): common_original_scene.pcd not found at {path_common_original_scene}")
         
         with open(path_model_file_txt, 'r') as f_model_path: loaded_model_file_path = f_model_path.read().strip()
         target_mesh_for_scene_viz = o3d.geometry.TriangleMesh() 
@@ -447,7 +479,7 @@ def main(cli_args_part2):
 
         if not target_pcd_model_centered_o3d.has_points() or \
            not target_pcd_original_model_scale_o3d.has_points() or \
-           not original_scene_o3d_pcd.has_points():
+           not original_scene_pcd.has_points():
             raise ValueError("One or more common PCD files failed to load or are empty.")
         print("Common data loaded successfully.")
     except Exception as e:
@@ -646,7 +678,7 @@ def main(cli_args_part2):
             if effective_args.visualize_pose_in_scene:
                 # Use the original target geometry (mesh or full PCD) and apply final_estimated_pose
                 # target_mesh_for_scene_viz is already loaded (original CAD model)
-                visualize_transformed_model_in_scene(original_scene_o3d_pcd, 
+                visualize_transformed_model_in_scene(original_scene_pcd, 
                                                      target_mesh_for_scene_viz, # This is the original CAD model
                                                      final_estimated_pose,
                                                      window_name=f"Final CAD in Scene (PyTorch ICP) - Inst {inst_id}")

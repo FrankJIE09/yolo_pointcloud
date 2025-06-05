@@ -11,6 +11,7 @@ import tempfile
 import re 
 import yaml
 import json
+from pyorbbecsdk import OBAlignMode # <<< IMPORT OBAlignMode HERE
 
 # Assuming orbbec_camera.py is in 'camera' subdirectory
 try:
@@ -305,8 +306,9 @@ def prepare_intermediate_data_for_part2(base_dir, object_pcd_o3d, cad_model_path
         target_centroid_original_np = target_pcd_original_model_scale_o3d.get_center()
         
         # Ensure the centered model FOR ICP has the specified number of points
-        if len(target_pcd_original_model_scale_o3d.points) != MODEL_SAMPLE_POINTS_FOR_PART2 and temp_mesh.has_vertices(): # Mesh path was okay
-             pass # Already sampled to MODEL_SAMPLE_POINTS_FOR_PART2 by sample_points_uniformly
+        target_pcd_for_centering_and_icp = None
+        if len(target_pcd_original_model_scale_o3d.points) == MODEL_SAMPLE_POINTS_FOR_PART2 and temp_mesh.has_vertices(): # Mesh path was okay
+             target_pcd_for_centering_and_icp = o3d.geometry.PointCloud(target_pcd_original_model_scale_o3d) # Copy for centering
         elif len(target_pcd_original_model_scale_o3d.points) == 0:
              raise ValueError("Target PCD is empty before centering and sampling.")
         else: # Was a PCD or sampling didn't give exact number, ensure target_pcd_centered_for_icp_o3d has correct count
@@ -319,7 +321,7 @@ def prepare_intermediate_data_for_part2(base_dir, object_pcd_o3d, cad_model_path
                 print(f"  Warning: Original target scale PCD has less than {MODEL_SAMPLE_POINTS_FOR_PART2} points (has {len(target_pcd_original_model_scale_o3d.points)}). Using all available for centered ICP target.")
                 target_pcd_for_centering_and_icp = o3d.geometry.PointCloud(target_pcd_original_model_scale_o3d) # Copy
         
-        if not target_pcd_for_centering_and_icp.has_points():
+        if target_pcd_for_centering_and_icp is None or not target_pcd_for_centering_and_icp.has_points():
              raise ValueError("Target PCD for centering and ICP is empty after sampling attempt.")
 
         target_pcd_centered_for_icp_o3d = o3d.geometry.PointCloud(target_pcd_for_centering_and_icp) # Make a copy to translate
@@ -362,9 +364,10 @@ def prepare_intermediate_data_for_part2(base_dir, object_pcd_o3d, cad_model_path
     try:
         if full_scene_pcd_o3d is not None and full_scene_pcd_o3d.has_points():
             # 确保保存时包含颜色信息
+            print(f"  DEBUG: Saving full_scene_pcd_o3d to {path_common_original_scene}. Has colors: {full_scene_pcd_o3d.has_colors()}")
             if full_scene_pcd_o3d.has_colors():
-                print(f"  Saving full original scene with colors to: {path_common_original_scene}")
-            o3d.io.write_point_cloud(path_common_original_scene, full_scene_pcd_o3d)
+                 print(f"    DEBUG: full_scene_pcd_o3d first 3 colors before saving: {np.asarray(full_scene_pcd_o3d.colors)[:3]}")
+            o3d.io.write_point_cloud(path_common_original_scene, full_scene_pcd_o3d, write_ascii=False) # Forcing binary for consistency
             print(f"  Saved full original scene to: {path_common_original_scene}")
         else:
             print("  Warning: Full scene PCD not provided or is empty. common_original_scene.pcd will not be saved.")
@@ -390,255 +393,304 @@ def main_yolo_orchestrator():
         available_sns = get_serial_numbers()
         if not available_sns:
             print("ERROR: No Orbbec devices found. Please check connection."); return
-        print(f"Found Orbbec devices: {available_sns}. Using first one: {available_sns[1]}")
-        camera_instance = OrbbecCamera("CP1Z842000DL") # CP1Z842000DL CP1Z842000DP CP1Z842000GN
+        print(f"Found Orbbec devices: {available_sns}. Using first one: {available_sns[0]}") # Use index 0
+        camera_instance = OrbbecCamera(available_sns[0]) # Use the first available SN
         camera_instance.start_stream(depth_stream=True, color_stream=True, use_alignment=True, enable_sync=True)
         if camera_instance.param is None or camera_instance.param.rgb_intrinsic is None:
             raise RuntimeError("Failed to get RGB camera intrinsics from camera after starting stream.")
         print("Orbbec Camera initialized and stream started with D2C alignment.")
-    except Exception as e:
-        print(f"ERROR: Failed to initialize Orbbec Camera or start stream: {e}")
-        if camera_instance: camera_instance.stop()
-        return
+        
+        # Correctly check for color stream and alignment status
+        color_stream_is_active = camera_instance.color_profile is not None
+        alignment_is_active = False
+        if hasattr(camera_instance, 'config') and camera_instance.config is not None and hasattr(camera_instance.config, 'get_align_mode'):
+            try:
+                alignment_is_active = camera_instance.config.get_align_mode() != OBAlignMode.ALIGN_DISABLE
+            except NameError: # This should no longer happen due to the import
+                 print("DEBUG: OBAlignMode was unexpectedly not defined.")
+            except Exception as e_align_check:
+                 print(f"DEBUG: Error checking align mode: {e_align_check}")
+        
+        print(f"DEBUG: 相机初始化完成。颜色流启用: {color_stream_is_active}, 深度对齐到颜色: {alignment_is_active}")
 
-    os.makedirs(ORCHESTRATOR_BASE_OUTPUT_DIR, exist_ok=True)
-    # part1_script_path = find_script_path(PART1_SCRIPT_NAME) # No longer needed
-    part2_script_path = find_script_path(PART2_SCRIPT_NAME)
-    config_yaml_path = find_script_path(CONFIG_YAML_FILE)
+        if not camera_instance.stream: # Check the 'stream' attribute which is set in start_stream
+            print("ERROR: Orbbec camera stream is not active after attempting to start. Exiting.")
+            return
 
-    if not all([part2_script_path, config_yaml_path]): # Check only Part2 script and config
-        print("ERROR: Part 2 script or main config file not found. Exiting.")
-        if camera_instance: camera_instance.stop(); return
+        os.makedirs(ORCHESTRATOR_BASE_OUTPUT_DIR, exist_ok=True)
+        # part1_script_path = find_script_path(PART1_SCRIPT_NAME) # No longer needed
+        part2_script_path = find_script_path(PART2_SCRIPT_NAME)
+        config_yaml_path = find_script_path(CONFIG_YAML_FILE)
 
-    try:
-        color_width = camera_instance.color_profile.get_width()
-        color_height = camera_instance.color_profile.get_height()
-        o3d_rgb_intrinsics = o3d.camera.PinholeCameraIntrinsic(
-            width=color_width, height=color_height,
-            fx=camera_instance.param.rgb_intrinsic.fx, fy=camera_instance.param.rgb_intrinsic.fy,
-            cx=camera_instance.param.rgb_intrinsic.cx, cy=camera_instance.param.rgb_intrinsic.cy
-        )
-        print("Successfully created Open3D RGB intrinsics object.")
-    except Exception as e:
-        print(f"ERROR: Could not get camera profile info or create O3D intrinsics: {e}")
-        if camera_instance: camera_instance.stop(); return
+        if not all([part2_script_path, config_yaml_path]): # Check only Part2 script and config
+            print("ERROR: Part 2 script or main config file not found. Exiting.")
+            if camera_instance: camera_instance.stop(); return
 
-    # --- Load YAML Configuration for ROI Depth Offsets ---
-    config_data = {}
-    if os.path.exists(CONFIG_YAML_FILE):
         try:
-            with open(CONFIG_YAML_FILE, 'r') as f:
-                config_data = yaml.safe_load(f)
-            print(f"Successfully loaded orchestrator config from {CONFIG_YAML_FILE}")
-        except yaml.YAMLError as e:
-            print(f"Warning: Error parsing YAML config file {CONFIG_YAML_FILE}: {e}. Using default ROI offsets.")
+            color_width = camera_instance.color_profile.get_width()
+            color_height = camera_instance.color_profile.get_height()
+            o3d_rgb_intrinsics = o3d.camera.PinholeCameraIntrinsic(
+                width=color_width, height=color_height,
+                fx=camera_instance.param.rgb_intrinsic.fx, fy=camera_instance.param.rgb_intrinsic.fy,
+                cx=camera_instance.param.rgb_intrinsic.cx, cy=camera_instance.param.rgb_intrinsic.cy
+            )
+            print("Successfully created Open3D RGB intrinsics object.")
         except Exception as e:
-            print(f"Warning: Could not read YAML config file {CONFIG_YAML_FILE}: {e}. Using default ROI offsets.")
+            print(f"ERROR: Could not get camera profile info or create O3D intrinsics: {e}")
+            if camera_instance: camera_instance.stop(); return
+
+        # --- Load YAML Configuration for ROI Depth Offsets ---
+        config_data = {}
+        if os.path.exists(CONFIG_YAML_FILE):
+            try:
+                with open(CONFIG_YAML_FILE, 'r') as f:
+                    config_data = yaml.safe_load(f)
+                print(f"Successfully loaded orchestrator config from {CONFIG_YAML_FILE}")
+            except yaml.YAMLError as e:
+                print(f"Warning: Error parsing YAML config file {CONFIG_YAML_FILE}: {e}. Using default ROI offsets.")
+            except Exception as e:
+                print(f"Warning: Could not read YAML config file {CONFIG_YAML_FILE}: {e}. Using default ROI offsets.")
             
-    roi_extraction_config = config_data.get('ROIExtraction', {})
-    # Define these variables in the function scope before the loop
-    global DEPTH_BEHIND_OFFSET_M, DEPTH_FRONT_OFFSET_M # Make them global if used in other functions not receiving them as params, though it seems they are only used locally in main_yolo_orchestrator
-    DEPTH_BEHIND_OFFSET_M = roi_extraction_config.get('depth_behind_offset_m', 0.5) # Default 0.5m
-    DEPTH_FRONT_OFFSET_M = roi_extraction_config.get('depth_front_offset_m', 0.05)  # Default 0.05m (small positive value)
-    print(f"ROI Depth Offsets: Behind={DEPTH_BEHIND_OFFSET_M}m, Front={DEPTH_FRONT_OFFSET_M}m")
-    # --- End YAML Loading ---
+        roi_extraction_config = config_data.get('ROIExtraction', {})
+        # Define these variables in the function scope before the loop
+        global DEPTH_BEHIND_OFFSET_M, DEPTH_FRONT_OFFSET_M # Make them global if used in other functions not receiving them as params, though it seems they are only used locally in main_yolo_orchestrator
+        DEPTH_BEHIND_OFFSET_M = roi_extraction_config.get('depth_behind_offset_m', 0.5) # Default 0.5m
+        DEPTH_FRONT_OFFSET_M = roi_extraction_config.get('depth_front_offset_m', 0.05)  # Default 0.05m (small positive value)
+        print(f"ROI Depth Offsets: Behind={DEPTH_BEHIND_OFFSET_M}m, Front={DEPTH_FRONT_OFFSET_M}m")
+        # --- End YAML Loading ---
 
-    print("\nOrchestrator ready. Press 'r' in OpenCV window to detect objects and run pose estimation pipeline.")
-    print("Press 'q' to quit.")
+        print("\nOrchestrator ready. Press 'r' in OpenCV window to detect objects and run pose estimation pipeline.")
+        print("Press 'q' to quit.")
 
-    # Create a dictionary of orchestrator settings that might be useful for args.json
-    # This is a placeholder; Part 2 will load its own args from YAML and CLI overrides
-    orchestrator_args_for_part2_json = {
-        "yolo_model": YOLO_MODEL_PATH,
-        "yolo_target_classes": YOLO_TARGET_CLASS_NAMES,
-        "invoked_by_yolo_orchestrator_direct_to_part2": True
-        # Add any other relevant info if Part 2 needs to know about its caller
-    }
+        # Create a dictionary of orchestrator settings that might be useful for args.json
+        # This is a placeholder; Part 2 will load its own args from YAML and CLI overrides
+        orchestrator_args_for_part2_json = {
+            "yolo_model": YOLO_MODEL_PATH,
+            "yolo_target_classes": YOLO_TARGET_CLASS_NAMES,
+            "invoked_by_yolo_orchestrator_direct_to_part2": True
+            # Add any other relevant info if Part 2 needs to know about its caller
+        }
 
-    try:
-        while True:
-            color_image, _, depth_frame_obj = camera_instance.get_frames()
-            if color_image is None:
-                cv2.imshow("YOLO Object Detection (Orbbec)", np.zeros((480,640,3), dtype=np.uint8))
-                if cv2.waitKey(30) & 0xFF == ord('q'): break
-                continue
-            
-            display_image = color_image.copy()
-            key = cv2.waitKey(10) & 0xFF
+        try:
+            while True:
+                color_image, _, depth_frame_obj = camera_instance.get_frames()
+                if color_image is None:
+                    cv2.imshow("YOLO Object Detection (Orbbec)", np.zeros((480,640,3), dtype=np.uint8))
+                    if cv2.waitKey(30) & 0xFF == ord('q'): break
+                    continue
+                
+                display_image = color_image.copy()
+                key = cv2.waitKey(10) & 0xFF
 
-            if key == ord('q'): print("'q' pressed. Exiting..."); break
-            
-            if key == ord('r'):
-                print("\n'r' pressed. Running YOLO detection and pose estimation pipeline (direct to Part 2)...")
-                yolo_results = yolo_model(color_image, conf=YOLO_CONF_THRESHOLD,show=True)
-                processed_one_object = False
-                if yolo_results and len(yolo_results) > 0:
-                    detections = yolo_results[0]
-                    names = detections.names
-                    print(f"YOLO found {len(detections.boxes)} objects in total.")
-                    target_object_found_this_trigger = False
+                if key == ord('q'): print("'q' pressed. Exiting..."); break
+                
+                if key == ord('r'):
+                    print("\n'r' pressed. Running YOLO detection and pose estimation pipeline (direct to Part 2)...")
+                    yolo_results = yolo_model(color_image, conf=YOLO_CONF_THRESHOLD,show=True)
+                    processed_one_object = False
+                    if yolo_results and len(yolo_results) > 0:
+                        detections = yolo_results[0]
+                        names = detections.names
+                        print(f"YOLO found {len(detections.boxes)} objects in total.")
+                        target_object_found_this_trigger = False
 
-                    for i in range(len(detections.boxes)):
-                        box = detections.boxes[i]
-                        cls_id = int(box.cls[0])
-                        conf = float(box.conf[0])
-                        class_name = names.get(cls_id, f"ClassID_{cls_id}")
-                        xyxy = box.xyxy[0].cpu().numpy().astype(int)
+                        for i in range(len(detections.boxes)):
+                            box = detections.boxes[i]
+                            cls_id = int(box.cls[0])
+                            conf = float(box.conf[0])
+                            class_name = names.get(cls_id, f"ClassID_{cls_id}")
+                            xyxy = box.xyxy[0].cpu().numpy().astype(int)
 
-                        if conf >= YOLO_CONF_THRESHOLD:
-                            is_target_class = class_name in YOLO_TARGET_CLASS_NAMES
-                            color = (0, 255, 0) if is_target_class else (255, 0, 0) # Green for target, Blue for non-target
+                            if conf >= YOLO_CONF_THRESHOLD:
+                                is_target_class = class_name in YOLO_TARGET_CLASS_NAMES
+                                color = (0, 255, 0) if is_target_class else (255, 0, 0) # Green for target, Blue for non-target
 
-                            cv2.rectangle(display_image, (xyxy[0], xyxy[1]), (xyxy[2], xyxy[3]), color, 2)
-                            cv2.putText(display_image, f"{class_name} {conf:.2f}", (xyxy[0], xyxy[1]-10),
-                                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+                                cv2.rectangle(display_image, (xyxy[0], xyxy[1]), (xyxy[2], xyxy[3]), color, 2)
+                                cv2.putText(display_image, f"{class_name} {conf:.2f}", (xyxy[0], xyxy[1]-10),
+                                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
 
-                            if is_target_class:
-                                print(f"  Target object for processing: {class_name} with confidence {conf:.2f}")
-                                target_object_found_this_trigger = True
-                                
-                                # --- Get representative depth of the object in the ROI ---
-                                object_median_depth_m = None
-                                if depth_frame_obj: # Ensure depth_frame_obj is valid
-                                    object_median_depth_m = get_median_roi_depth_m(depth_frame_obj, xyxy)
-                                
-                                if object_median_depth_m is None:
-                                    print(f"  Warning: Could not determine median depth for ROI of {class_name}. Skipping depth-based crop modification for this object.")
-                                    # Fallback to simple 2D ROI crop (or skip entirely if depth is crucial)
-                                    # For now, let's try to get full PCD and then if depth crop fails, it will be handled.
-                                    # If we skip here, the else block for no_target_found won't be triggered correctly.
-
-                                # --- Get full point cloud ---
-                                print("  Getting full point cloud...")
-                                raw_data_from_camera = camera_instance.get_point_cloud(colored=True) # This applies its own MIN/MAX_DEPTH filter
-                                
-                                # --- Ensure full_pcd_o3d is an Open3D PointCloud object ---
-                                if raw_data_from_camera is None:
-                                    print("  Warning: Camera returned None for full point cloud. Using empty point cloud.")
-                                    full_pcd_o3d = o3d.geometry.PointCloud()
-                                elif isinstance(raw_data_from_camera, np.ndarray):
-                                    if raw_data_from_camera.ndim == 2 and raw_data_from_camera.shape[0] > 0 and raw_data_from_camera.shape[1] >= 3:
-                                        full_pcd_o3d = o3d.geometry.PointCloud()
-                                        full_pcd_o3d.points = o3d.utility.Vector3dVector(raw_data_from_camera[:, :3])
-                                        if raw_data_from_camera.shape[1] >= 6: # Check for color
-                                            colors = raw_data_from_camera[:, 3:6]
-                                            if colors.dtype == np.uint8:
-                                                colors = colors.astype(np.float64) / 255.0
-                                            elif colors.dtype in [np.float32, np.float64]:
-                                                if np.any(colors < 0.0) or np.any(colors > 1.0):
-                                                    # print(f"  Warning: Full PCD float color data appears outside [0,1]. Clipping.")
-                                                    colors = np.clip(colors, 0.0, 1.0)
-                                            full_pcd_o3d.colors = o3d.utility.Vector3dVector(colors)
-                                    else:
-                                        print(f"  Warning: Full PCD NumPy array from camera has invalid shape: {raw_data_from_camera.shape}. Using empty point cloud.")
-                                        full_pcd_o3d = o3d.geometry.PointCloud()
-                                elif hasattr(raw_data_from_camera, 'has_points'): # Already an Open3D PointCloud
-                                    full_pcd_o3d = raw_data_from_camera
-                                else:
-                                    print(f"  Warning: Camera returned unexpected type for full point cloud: {type(raw_data_from_camera)}. Using empty point cloud.")
-                                    full_pcd_o3d = o3d.geometry.PointCloud()
-                                # --- End Open3D conversion ---
-                                
-                                if full_pcd_o3d is None or not full_pcd_o3d.has_points():
-                                     # This check was already here, but now apply it after attempting to get full_pcd_o3d
-                                    print("  ERROR: Failed to get a valid full point cloud. Skipping this object.")
-                                    continue # Skip to next detected box or next frame trigger
-
-                                print(f"  Full point cloud has {len(full_pcd_o3d.points)} points (after camera's initial depth filter).")
-
-                                # --- Crop point cloud using ROI and Depth Range ---
-                                if object_median_depth_m is not None:
-                                    min_crop_depth_m = object_median_depth_m - DEPTH_FRONT_OFFSET_M
-                                    max_crop_depth_m = object_median_depth_m + DEPTH_BEHIND_OFFSET_M
-                                    print(f"  Target object median depth: {object_median_depth_m:.3f}m. Cropping PC in range: [{min_crop_depth_m:.3f}m - {max_crop_depth_m:.3f}m].")
+                                if is_target_class:
+                                    print(f"  Target object for processing: {class_name} with confidence {conf:.2f}")
+                                    target_object_found_this_trigger = True
                                     
-                                    object_pcd_o3d = crop_point_cloud_from_roi_and_depth_range(
-                                        full_pcd_o3d, xyxy, o3d_rgb_intrinsics,
-                                        min_crop_depth_m, max_crop_depth_m
+                                    # --- Get representative depth of the object in the ROI ---
+                                    object_median_depth_m = None
+                                    if depth_frame_obj: # Ensure depth_frame_obj is valid
+                                        object_median_depth_m = get_median_roi_depth_m(depth_frame_obj, xyxy)
+                                    
+                                    if object_median_depth_m is None:
+                                        print(f"  Warning: Could not determine median depth for ROI of {class_name}. Skipping depth-based crop modification for this object.")
+                                        # Fallback to simple 2D ROI crop (or skip entirely if depth is crucial)
+                                        # For now, let's try to get full PCD and then if depth crop fails, it will be handled.
+                                        # If we skip here, the else block for no_target_found won't be triggered correctly.
+
+                                    # --- Get full point cloud ---
+                                    print("  Getting full point cloud...")
+                                    raw_data_from_camera = camera_instance.get_point_cloud(colored=True) # This applies its own MIN/MAX_DEPTH filter
+                                    
+                                    # >>> ADD DETAILED LOGS FOR RAW DATA AND COLOR PROCESSING HERE <<<
+                                    print(f"DEBUG: In main loop, raw_data_from_camera type: {type(raw_data_from_camera)}")
+                                    if isinstance(raw_data_from_camera, np.ndarray):
+                                        print(f"DEBUG: raw_data_from_camera shape: {raw_data_from_camera.shape}")
+                                        if raw_data_from_camera.ndim == 2 and raw_data_from_camera.shape[0] > 0:
+                                            print(f"DEBUG: raw_data_from_camera columns: {raw_data_from_camera.shape[1]}")
+                                        else:
+                                            print("DEBUG: raw_data_from_camera is not a 2D array or is empty.")
+                                    elif raw_data_from_camera is None:
+                                        print("DEBUG: raw_data_from_camera is None at conversion point.")
+
+                                    # Convert raw NumPy PCD to Open3D PointCloud object
+                                    full_pcd_o3d = o3d.geometry.PointCloud()
+                                    if raw_data_from_camera is not None and isinstance(raw_data_from_camera, np.ndarray) and raw_data_from_camera.ndim == 2 and raw_data_from_camera.shape[0] > 0 and raw_data_from_camera.shape[1] >= 3:
+                                        full_pcd_o3d.points = o3d.utility.Vector3dVector(raw_data_from_camera[:, :3])
+                                        print(f"DEBUG: Assigned {len(full_pcd_o3d.points)} points to full_pcd_o3d.")
+                                        if raw_data_from_camera.shape[1] >= 6:
+                                            print(f"DEBUG: Raw data has {raw_data_from_camera.shape[1]} columns, attempting to extract color.")
+                                            colors_np = raw_data_from_camera[:, 3:6]
+                                            print(f"DEBUG: Extracted colors_np shape: {colors_np.shape}, dtype: {colors_np.dtype}, min_val: {np.min(colors_np) if colors_np.size > 0 else 'N/A'}, max_val: {np.max(colors_np) if colors_np.size > 0 else 'N/A'}")
+                                            
+                                            if colors_np.dtype == np.uint8:
+                                                print("DEBUG: Color data type is uint8. Converting to float and normalizing [0,1].")
+                                                colors_np_float = colors_np.astype(np.float64) / 255.0
+                                                print(f"DEBUG: Colors normalized from uint8. New min: {np.min(colors_np_float) if colors_np_float.size > 0 else 'N/A'}, max: {np.max(colors_np_float) if colors_np_float.size > 0 else 'N/A'}")
+                                                full_pcd_o3d.colors = o3d.utility.Vector3dVector(colors_np_float)
+                                            elif colors_np.dtype in [np.float32, np.float64]:
+                                                print(f"DEBUG: Color data type is {colors_np.dtype}. Checking if in [0,1] range.")
+                                                if np.any(colors_np < 0.0) or np.any(colors_np > 1.0):
+                                                    print("DEBUG: Color data not in [0,1] range. Clipping.")
+                                                    colors_np_clipped = np.clip(colors_np, 0.0, 1.0)
+                                                    full_pcd_o3d.colors = o3d.utility.Vector3dVector(colors_np_clipped)
+                                                    print(f"DEBUG: Colors clipped. New min: {np.min(colors_np_clipped)}, max: {np.max(colors_np_clipped)}.")
+                                                else:
+                                                    print("DEBUG: Color data already in [0,1] range. Assigning directly.")
+                                                    full_pcd_o3d.colors = o3d.utility.Vector3dVector(colors_np)
+                                            else:
+                                                print(f"DEBUG: Unexpected color dtype: {colors_np.dtype}. Colors will not be assigned.")
+                                            
+                                            if full_pcd_o3d.has_colors():
+                                                print(f"DEBUG: Colors assigned to full_pcd_o3d. Has colors: True. First 3 color values: {np.asarray(full_pcd_o3d.colors)[:3]}")
+                                            else:
+                                                print("DEBUG: Colors were processed but full_pcd_o3d still has no colors.")
+                                        else:
+                                            print("DEBUG: Raw data has < 6 columns, no color information to extract for full_pcd_o3d.")
+                                    else:
+                                        print("Warning: Raw point cloud data from camera is None or invalid shape for full_pcd_o3d processing. Resulting full_pcd_o3d might be empty.")
+
+                                    if not full_pcd_o3d.has_points():
+                                        # This check was already here, but now apply it after attempting to get full_pcd_o3d
+                                        print("  ERROR: Failed to get a valid full point cloud. Skipping this object.")
+                                        continue # Skip to next detected box or next frame trigger
+
+                                    print(f"  Full point cloud has {len(full_pcd_o3d.points)} points (after camera's initial depth filter).")
+
+                                    # --- Crop point cloud using ROI and Depth Range ---
+                                    if object_median_depth_m is not None:
+                                        min_crop_depth_m = object_median_depth_m - DEPTH_FRONT_OFFSET_M
+                                        max_crop_depth_m = object_median_depth_m + DEPTH_BEHIND_OFFSET_M
+                                        print(f"  Target object median depth: {object_median_depth_m:.3f}m. Cropping PC in range: [{min_crop_depth_m:.3f}m - {max_crop_depth_m:.3f}m].")
+                                        
+                                        object_pcd_o3d = crop_point_cloud_from_roi_and_depth_range(
+                                            full_pcd_o3d, xyxy, o3d_rgb_intrinsics,
+                                            min_crop_depth_m, max_crop_depth_m
+                                        )
+                                    else:
+                                        # Fallback: if median depth couldn't be found, try a wide depth range or old 2D method
+                                        print("  Fallback: Using a wide depth range for cropping as object median depth was not found.")
+                                        # This will use a very generic depth range, effectively just the 2D ROI if min/max are too broad.
+                                        # Or, revert to the old 2D-only cropping method if preferred.
+                                        # For now, let's use very broad min/max which the existing crop_point_cloud_from_roi_and_depth_range
+                                        # will mostly ignore if points are outside the camera's own MIN_DEPTH/MAX_DEPTH from get_point_cloud()
+                                        object_pcd_o3d = crop_point_cloud_from_roi_and_depth_range(
+                                            full_pcd_o3d, xyxy, o3d_rgb_intrinsics,
+                                            0.1, 10.0 # Default very wide range (0.1m to 10m)
+                                        )
+
+
+                                    if not object_pcd_o3d.has_points() or len(object_pcd_o3d.points) < 10: # Check if cropping yielded enough points
+                                        print("  Warning: Cropped object point cloud (with depth range) is empty or too sparse. Skipping."); 
+                                        continue # Skip to next detected box or next frame trigger
+                                    
+                                    timestamp = time.strftime("%Y%m%d-%H%M%S")
+                                    current_run_output_dir = os.path.join(ORCHESTRATOR_BASE_OUTPUT_DIR, f"run_{class_name}_{timestamp}")
+                                    intermediate_dir_for_part2 = os.path.join(current_run_output_dir, "intermediate_for_part2") 
+                                    
+                                    target_cad_model_file = CLASS_TO_MODEL_FILE_MAP.get(class_name)
+                                    if not target_cad_model_file or not os.path.exists(target_cad_model_file):
+                                        print(f"  ERROR: CAD Model for class '{class_name}' not found. Path: '{target_cad_model_file}'. Skipping."); continue
+                                    
+                                    # Prepare the intermediate directory for Part 2 manually
+                                    print(f"DEBUG: About to call prepare_intermediate_data_for_part2.")
+                                    print(f"  DEBUG: object_pcd_o3d_for_part2.has_colors(): {object_pcd_o3d.has_colors() if object_pcd_o3d else 'None'}")
+                                    # The full_scene_pcd_for_part2 is what gets saved as common_original_scene.pcd
+                                    print(f"  DEBUG: full_scene_pcd_for_part2.has_colors(): {full_pcd_o3d.has_colors() if full_pcd_o3d else 'None'}") 
+                                    if full_pcd_o3d and full_pcd_o3d.has_colors():
+                                         print(f"    DEBUG: full_scene_pcd_for_part2 first 3 colors before prepare_intermediate: {np.asarray(full_pcd_o3d.colors)[:3]}")
+
+                                    prepared_intermediate_path = prepare_intermediate_data_for_part2(
+                                        intermediate_dir_for_part2,
+                                        object_pcd_o3d,              # This is the cropped ROI point cloud
+                                        target_cad_model_file,
+                                        orchestrator_args_for_part2_json,
+                                        full_pcd_o3d                 # Pass the full scene PCD
                                     )
-                                else:
-                                    # Fallback: if median depth couldn't be found, try a wide depth range or old 2D method
-                                    print("  Fallback: Using a wide depth range for cropping as object median depth was not found.")
-                                    # This will use a very generic depth range, effectively just the 2D ROI if min/max are too broad.
-                                    # Or, revert to the old 2D-only cropping method if preferred.
-                                    # For now, let's use very broad min/max which the existing crop_point_cloud_from_roi_and_depth_range
-                                    # will mostly ignore if points are outside the camera's own MIN_DEPTH/MAX_DEPTH from get_point_cloud()
-                                    object_pcd_o3d = crop_point_cloud_from_roi_and_depth_range(
-                                        full_pcd_o3d, xyxy, o3d_rgb_intrinsics,
-                                        0.1, 10.0 # Default very wide range (0.1m to 10m)
-                                    )
+                                    if not prepared_intermediate_path:
+                                        print("  ERROR: Failed to prepare intermediate data for Part 2. Skipping."); continue
+                                    
+                                    print(f"\n  --- Running Part 2 for {class_name} (using prepared data: {prepared_intermediate_path}) ---")
+                                    part2_final_results_dir = os.path.join(current_run_output_dir, "part2_final_poses")
+                                    os.makedirs(part2_final_results_dir, exist_ok=True)
+                                    cmd_part2 = [
+                                        sys.executable, part2_script_path,
+                                        "--intermediate_dir", prepared_intermediate_path,
+                                        "--config_file", config_yaml_path,
+                                        "--output_dir_part2", part2_final_results_dir,
+                                    ]
+                                    cmd_part2.append("--visualize_pose")
+                                    cmd_part2.append("--visualize_pose_in_scene")
+                                    cmd_part2.append("--save_results")
 
+                                    parse_dict_part2 = {"npz_file": r"Saved PyTorch ICP poses to (.*\.npz)"}
+                                    part2_results = run_command_and_parse_output(cmd_part2, parse_dict_part2)
 
-                                if not object_pcd_o3d.has_points() or len(object_pcd_o3d.points) < 10: # Check if cropping yielded enough points
-                                    print("  Warning: Cropped object point cloud (with depth range) is empty or too sparse. Skipping."); 
-                                    continue # Skip to next detected box or next frame trigger
-                                
-                                timestamp = time.strftime("%Y%m%d-%H%M%S")
-                                current_run_output_dir = os.path.join(ORCHESTRATOR_BASE_OUTPUT_DIR, f"run_{class_name}_{timestamp}")
-                                intermediate_dir_for_part2 = os.path.join(current_run_output_dir, "intermediate_for_part2") 
-                                
-                                target_cad_model_file = CLASS_TO_MODEL_FILE_MAP.get(class_name)
-                                if not target_cad_model_file or not os.path.exists(target_cad_model_file):
-                                    print(f"  ERROR: CAD Model for class '{class_name}' not found. Path: '{target_cad_model_file}'. Skipping."); continue
-                                
-                                # Prepare the intermediate directory for Part 2 manually
-                                prepared_intermediate_path = prepare_intermediate_data_for_part2(
-                                    intermediate_dir_for_part2,
-                                    object_pcd_o3d,              # This is the cropped ROI point cloud
-                                    target_cad_model_file,
-                                    orchestrator_args_for_part2_json,
-                                    full_pcd_o3d                 # Pass the full scene PCD
-                                )
-                                if not prepared_intermediate_path:
-                                    print("  ERROR: Failed to prepare intermediate data for Part 2. Skipping."); continue
-                                
-                                print(f"\n  --- Running Part 2 for {class_name} (using prepared data: {prepared_intermediate_path}) ---")
-                                part2_final_results_dir = os.path.join(current_run_output_dir, "part2_final_poses")
-                                os.makedirs(part2_final_results_dir, exist_ok=True)
-                                cmd_part2 = [
-                                    sys.executable, part2_script_path,
-                                    "--intermediate_dir", prepared_intermediate_path,
-                                    "--config_file", config_yaml_path,
-                                    "--output_dir_part2", part2_final_results_dir,
-                                ]
-                                cmd_part2.append("--visualize_pose")
-                                cmd_part2.append("--visualize_pose_in_scene")
-                                cmd_part2.append("--save_results")
+                                    if not part2_results or not part2_results.get("npz_file"):
+                                        print("  ERROR: Part 2 failed or could not parse NPZ file path."); continue
+                                    npz_file_path = part2_results["npz_file"]
+                                    if not os.path.exists(npz_file_path):
+                                        print(f"  ERROR: NPZ file reported by Part 2 does not exist: {npz_file_path}"); continue
+                                    
+                                    print(f"\n  --- Results for {class_name} from {npz_file_path} ---")
+                                    try:
+                                        estimated_poses_data = np.load(npz_file_path)
+                                        if not estimated_poses_data.files:
+                                            print("  Warning: NPZ file is empty (no poses saved by Part 2).")
+                                        for instance_key in estimated_poses_data.files:
+                                            pose_matrix = estimated_poses_data[instance_key]
+                                            print(f"    Estimated Pose Matrix for '{instance_key}':\n{pose_matrix}")
+                                    except Exception as e_load_npz:
+                                        print(f"  ERROR loading or processing NPZ file {npz_file_path}: {e_load_npz}")
+                                    
+                                    print(f"  Pipeline finished for detected object: {class_name}")
+                                    processed_one_object = True
+                                    break 
+                        
+                        if not target_object_found_this_trigger:
+                            print("No target objects (from YOLO_TARGET_CLASS_NAMES) found with sufficient confidence.")
+                    else:
+                        print("YOLO did not return any results for this frame.")
+                
+                cv2.imshow("YOLO Object Detection (Orbbec)", display_image)
 
-                                parse_dict_part2 = {"npz_file": r"Saved PyTorch ICP poses to (.*\.npz)"}
-                                part2_results = run_command_and_parse_output(cmd_part2, parse_dict_part2)
+        except KeyboardInterrupt:
+            print("\nCtrl+C detected. Exiting orchestrator...")
+        finally:
+            if camera_instance:
+                print("Stopping Orbbec camera...")
+                camera_instance.stop()
+            cv2.destroyAllWindows()
+            print("YOLO Orchestrator finished (Direct to Part 2 Mode).")
 
-                                if not part2_results or not part2_results.get("npz_file"):
-                                    print("  ERROR: Part 2 failed or could not parse NPZ file path."); continue
-                                npz_file_path = part2_results["npz_file"]
-                                if not os.path.exists(npz_file_path):
-                                    print(f"  ERROR: NPZ file reported by Part 2 does not exist: {npz_file_path}"); continue
-                                
-                                print(f"\n  --- Results for {class_name} from {npz_file_path} ---")
-                                try:
-                                    estimated_poses_data = np.load(npz_file_path)
-                                    if not estimated_poses_data.files:
-                                        print("  Warning: NPZ file is empty (no poses saved by Part 2).")
-                                    for instance_key in estimated_poses_data.files:
-                                        pose_matrix = estimated_poses_data[instance_key]
-                                        print(f"    Estimated Pose Matrix for '{instance_key}':\n{pose_matrix}")
-                                except Exception as e_load_npz:
-                                    print(f"  ERROR loading or processing NPZ file {npz_file_path}: {e_load_npz}")
-                                
-                                print(f"  Pipeline finished for detected object: {class_name}")
-                                processed_one_object = True
-                                break 
-                    
-                    if not target_object_found_this_trigger:
-                        print("No target objects (from YOLO_TARGET_CLASS_NAMES) found with sufficient confidence.")
-                else:
-                    print("YOLO did not return any results for this frame.")
-            
-            cv2.imshow("YOLO Object Detection (Orbbec)", display_image)
-
-    except KeyboardInterrupt:
-        print("\nCtrl+C detected. Exiting orchestrator...")
-    finally:
+    except Exception as e:
+        print(f"ERROR: Main loop exception: {e}")
         if camera_instance:
             print("Stopping Orbbec camera...")
             camera_instance.stop()

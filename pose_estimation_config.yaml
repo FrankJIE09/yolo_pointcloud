@@ -15,23 +15,23 @@ InstancePreprocessing: # These parameters are for _estimate_pose_part2_icp_estim
   preprocess_fps_n_points: 2048
 
 ICPParameters: # These parameters are for _estimate_pose_part2_icp_estimation.py
-  icp_threshold: 10.0
+  icp_threshold: 5.0
   icp_estimation_method: 'point_to_plane'
   icp_relative_rmse: 0.00000001 # 1e-8, used as absolute RMSE change by custom PyTorch ICP
-  icp_max_iter: 50 # Reduced from 2000 for PyTorch ICP in Part2
+  icp_max_iter: 500 # Reduced from 2000 for PyTorch ICP in Part2
   icp_min_points: 100
 
 ControlVisualization: # Parameters potentially used by _estimate_pose_part2_icp_estimation.py
-  no_cuda: False # For Part 2 script if it uses CUDA for ICP
+  no_cuda: True # For Part 2 script if it uses CUDA for ICP
 
 # === NEW Section for ROI Extraction in YOLO Orchestrator ===
 ROIExtraction:
-  depth_behind_offset_m: 30   # Depth to include behind the object's median depth (meters)
-  depth_front_offset_m: 30   # Depth to include in front of the object's median depth (meters)
+  depth_behind_offset_m: 10   # Depth to include behind the object's median depth (meters)
+  depth_front_offset_m: 10   # Depth to include in front of the object's median depth (meters)
 
 # Configuration specific to _estimate_pose_part2_icp_estimation.py (KEEP THIS SECTION)
 Part2ScriptConfig:
-  intermediate_dir: './yolo_orchestrator_direct_to_part2_runs/run_truck_20250605-111233/intermediate_for_part2' # Example, will be overridden by orchestrator
+  intermediate_dir: './yolo_orchestrator_direct_to_part2_runs/run_truck_20250605-113817/intermediate_for_part2' # Example, will be overridden by orchestrator
   visualize_pose: True # Let CLI or Part 1 args.json (if any) decide, or default in Part 2 script
   visualize_pose_in_scene: True
   save_results: null
