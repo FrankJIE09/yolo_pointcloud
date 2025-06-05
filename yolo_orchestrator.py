@@ -21,15 +21,15 @@ except ImportError as e:
     sys.exit(1)
 
 # --- USER CONFIGURATIONS ---
-YOLO_MODEL_PATH = 'best.pt'  # Path to your YOLO model (e.g., yolov8n.pt, yolov8s.pt, or custom_model.pt)
+YOLO_MODEL_PATH = 'yolov8m.pt'  # Path to your YOLO model (e.g., yolov8n.pt, yolov8s.pt, or custom_model.pt)
 # List of target class names that your YOLO model can detect AND you want to process
-YOLO_TARGET_CLASS_NAMES = ['costa'] # IMPORTANT: Adjust to your model's classes and your targets
+YOLO_TARGET_CLASS_NAMES = ['truck'] # IMPORTANT: Adjust to your model's classes and your targets
 YOLO_CONF_THRESHOLD = 0.3  # Confidence threshold for YOLO detections
 
 # IMPORTANT: Map detected class names to their corresponding CAD model files for Part 1
 # The keys MUST match the names in YOLO_TARGET_CLASS_NAMES and your YOLO model output
 CLASS_TO_MODEL_FILE_MAP = {
-    'costa': 'Coca_Cola_250ml.STL',       # Replace with actual path
+    'truck': 'lixun.STL',       # Replace with actual path
 }
 
 # PART1_SCRIPT_NAME = "_estimate_pose_part1_pytorch_coarse_align.py" # No longer calling Part 1
@@ -252,6 +252,9 @@ def prepare_intermediate_data_for_part2(base_dir, object_pcd_o3d, cad_model_path
     # 2. Save scene_observed_for_icp.pcd (the cropped object)
     path_scene_observed_for_icp = os.path.join(base_dir, "scene_observed_for_icp.pcd")
     try:
+        # 确保保存时包含颜色信息
+        if object_pcd_o3d.has_colors():
+            print(f"  Saving observed object with colors to: {path_scene_observed_for_icp}")
         o3d.io.write_point_cloud(path_scene_observed_for_icp, object_pcd_o3d)
         print(f"  Saved observed object (for ICP source) to: {path_scene_observed_for_icp}")
     except Exception as e:
@@ -260,6 +263,9 @@ def prepare_intermediate_data_for_part2(base_dir, object_pcd_o3d, cad_model_path
     # 2b. Save the same cropped object PCD as instance_0_preprocessed.pcd for Part 2
     path_instance_0_preprocessed = os.path.join(base_dir, "instance_0_preprocessed.pcd")
     try:
+        # 确保保存时包含颜色信息
+        if object_pcd_o3d.has_colors():
+            print(f"  Saving instance_0_preprocessed with colors to: {path_instance_0_preprocessed}")
         o3d.io.write_point_cloud(path_instance_0_preprocessed, object_pcd_o3d)
         print(f"  Saved observed object also as instance_0_preprocessed.pcd to: {path_instance_0_preprocessed}")
     except Exception as e:
@@ -274,8 +280,6 @@ def prepare_intermediate_data_for_part2(base_dir, object_pcd_o3d, cad_model_path
             print(f"  Saved instance_0_centroid.npy to: {path_instance_0_centroid}")
         else:
             print("  Warning: object_pcd_o3d is empty, cannot save instance_0_centroid.npy. Part 2 might fail.")
-            # Optionally save a zero centroid if Part 2 requires the file to exist
-            # np.save(path_instance_0_centroid, np.array([0.0, 0.0, 0.0])) 
     except Exception as e:
         print(f"  ERROR saving instance_0_centroid.npy: {e}"); return None
 
@@ -293,13 +297,7 @@ def prepare_intermediate_data_for_part2(base_dir, object_pcd_o3d, cad_model_path
             # If it was a PCD and we want to ensure a specific number of points, resample if necessary
             if len(target_pcd_original_model_scale_o3d.points) != MODEL_SAMPLE_POINTS_FOR_PART2 and len(target_pcd_original_model_scale_o3d.points) > 0 :
                  print(f"  Resampling loaded target PCD from {len(target_pcd_original_model_scale_o3d.points)} to {MODEL_SAMPLE_POINTS_FOR_PART2} points for consistency.")
-                 target_pcd_original_model_scale_o3d = target_pcd_original_model_scale_o3d.random_down_sample(MODEL_SAMPLE_POINTS_FOR_PART2 / len(target_pcd_original_model_scale_o3d.points)) # This might not give exact number
-                 # A more robust way for exact number if needed:
-                 # target_pcd_original_model_scale_o3d = target_pcd_original_model_scale_o3d.uniform_down_sample(every_k_points) or a custom sampling.
-                 # For now, let's assume read_point_cloud + possible uniform sampling (if it were mesh) is sufficient or direct use if it's already a pcd.
-                 # The original code implies sample_points_uniformly is the main path for meshes.
-                 # If it's already a PCD, we assume it's pre-sampled or the count doesn't strictly need to be MODEL_SAMPLE_POINTS_FOR_PART2 for the *original_scale* one.
-                 # The *centered* one below IS sampled to MODEL_SAMPLE_POINTS_FOR_PART2.
+                 target_pcd_original_model_scale_o3d = target_pcd_original_model_scale_o3d.farthest_point_down_sample(MODEL_SAMPLE_POINTS_FOR_PART2)
     
         if not target_pcd_original_model_scale_o3d.has_points():
             raise ValueError("CAD model has no points after loading/sampling for Part 2 target.")
@@ -307,8 +305,6 @@ def prepare_intermediate_data_for_part2(base_dir, object_pcd_o3d, cad_model_path
         target_centroid_original_np = target_pcd_original_model_scale_o3d.get_center()
         
         # Ensure the centered model FOR ICP has the specified number of points
-        # If the original was a mesh, sample_points_uniformly already did this.
-        # If it was a PCD, sample it now to ensure the correct number for target_pcd_centered_for_icp_o3d
         if len(target_pcd_original_model_scale_o3d.points) != MODEL_SAMPLE_POINTS_FOR_PART2 and temp_mesh.has_vertices(): # Mesh path was okay
              pass # Already sampled to MODEL_SAMPLE_POINTS_FOR_PART2 by sample_points_uniformly
         elif len(target_pcd_original_model_scale_o3d.points) == 0:
@@ -332,24 +328,30 @@ def prepare_intermediate_data_for_part2(base_dir, object_pcd_o3d, cad_model_path
         path_common_target_orig_scale = os.path.join(base_dir, "common_target_model_original_scale.pcd")
         path_common_target_centroid = os.path.join(base_dir, "common_target_centroid_original_model_scale.npy")
         path_model_file_txt = os.path.join(base_dir, "model_file_path.txt")
-        # path_target_centered_for_icp = os.path.join(base_dir, "target_model_centered_for_icp.pcd") # OLD NAME
-        path_target_centered_for_icp = os.path.join(base_dir, "common_target_model_centered.pcd") # NEW NAME for Part 2
+        path_target_centered_for_icp = os.path.join(base_dir, "common_target_model_centered.pcd")
 
+        # 保存目标模型时保留颜色信息
+        if target_pcd_original_model_scale_o3d.has_colors():
+            print(f"  Saving target model with colors to: {path_common_target_orig_scale}")
         o3d.io.write_point_cloud(path_common_target_orig_scale, target_pcd_original_model_scale_o3d)
-        np.save(path_common_target_centroid, target_centroid_original_np) # This should be centroid of original scale
+        
+        np.save(path_common_target_centroid, target_centroid_original_np)
         with open(path_model_file_txt, 'w') as f_model: f_model.write(cad_model_path)
+        
+        # 保存居中的目标模型时保留颜色信息
+        if target_pcd_centered_for_icp_o3d.has_colors():
+            print(f"  Saving centered target model with colors to: {path_target_centered_for_icp}")
         o3d.io.write_point_cloud(path_target_centered_for_icp, target_pcd_centered_for_icp_o3d)
+        
         print(f"  Saved target model files (original, centroid, centered for ICP as common_target_model_centered.pcd) to {base_dir}")
 
     except Exception as e_load_cad:
         print(f"  ERROR processing CAD model '{cad_model_path}' for Part 2: {e_load_cad}"); return None
 
     # 4. Save initial_transform_for_icp.npy (identity matrix as Part 1 is skipped)
-    # RENAMING this to instance_0_pca_transform.npy for Part 2 consistency
-    initial_transform_np = np.identity(4)
-    # path_initial_transform = os.path.join(base_dir, "initial_transform_for_icp.npy") # OLD NAME
-    path_instance_0_pca_transform = os.path.join(base_dir, "instance_0_pca_transform.npy") # NEW NAME
+    path_instance_0_pca_transform = os.path.join(base_dir, "instance_0_pca_transform.npy")
     try:
+        initial_transform_np = np.identity(4)
         np.save(path_instance_0_pca_transform, initial_transform_np)
         print(f"  Saved identity initial transform as instance_0_pca_transform.npy to: {path_instance_0_pca_transform}")
     except Exception as e_save_transform:
@@ -359,15 +361,15 @@ def prepare_intermediate_data_for_part2(base_dir, object_pcd_o3d, cad_model_path
     path_common_original_scene = os.path.join(base_dir, "common_original_scene.pcd")
     try:
         if full_scene_pcd_o3d is not None and full_scene_pcd_o3d.has_points():
+            # 确保保存时包含颜色信息
+            if full_scene_pcd_o3d.has_colors():
+                print(f"  Saving full original scene with colors to: {path_common_original_scene}")
             o3d.io.write_point_cloud(path_common_original_scene, full_scene_pcd_o3d)
             print(f"  Saved full original scene to: {path_common_original_scene}")
         else:
             print("  Warning: Full scene PCD not provided or is empty. common_original_scene.pcd will not be saved.")
-            # Create an empty file if Part 2 absolutely requires it to exist
-            # o3d.io.write_point_cloud(path_common_original_scene, o3d.geometry.PointCloud()) 
     except Exception as e_save_scene:
         print(f"  ERROR saving common_original_scene.pcd: {e_save_scene}")
-        # Do not return None here, as other files might be okay. Part 2 might handle missing scene.
     
     return base_dir # Return the path to the prepared directory
 
@@ -388,8 +390,8 @@ def main_yolo_orchestrator():
         available_sns = get_serial_numbers()
         if not available_sns:
             print("ERROR: No Orbbec devices found. Please check connection."); return
-        print(f"Found Orbbec devices: {available_sns}. Using first one: {available_sns[0]}")
-        camera_instance = OrbbecCamera(available_sns[0])
+        print(f"Found Orbbec devices: {available_sns}. Using first one: {available_sns[1]}")
+        camera_instance = OrbbecCamera("CP1Z842000DL") # CP1Z842000DL CP1Z842000DP CP1Z842000GN
         camera_instance.start_stream(depth_stream=True, color_stream=True, use_alignment=True, enable_sync=True)
         if camera_instance.param is None or camera_instance.param.rgb_intrinsic is None:
             raise RuntimeError("Failed to get RGB camera intrinsics from camera after starting stream.")

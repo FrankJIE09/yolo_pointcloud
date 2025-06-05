@@ -31,7 +31,7 @@ ROIExtraction:
 
 # Configuration specific to _estimate_pose_part2_icp_estimation.py (KEEP THIS SECTION)
 Part2ScriptConfig:
-  intermediate_dir: './yolo_orchestrator_direct_to_part2_runs/run_costa_20250604-100008/intermediate_for_part2' # Example, will be overridden by orchestrator
+  intermediate_dir: './yolo_orchestrator_direct_to_part2_runs/run_truck_20250605-111233/intermediate_for_part2' # Example, will be overridden by orchestrator
   visualize_pose: True # Let CLI or Part 1 args.json (if any) decide, or default in Part 2 script
   visualize_pose_in_scene: True
   save_results: null

@@ -267,56 +267,63 @@ def visualize_icp_alignment(source_pcd_transformed_model, instance_pcd_observed,
         except Exception as e:
             print(f"Error during visualization: {e}")
 
-def visualize_transformed_model_in_scene(original_scene_pcd, target_model_geometry, estimated_pose,
-                                         window_name="Transformed Model in Original Scene"):
-    if not OPEN3D_AVAILABLE: print("Open3D not available, skipping visualization."); return
-    scene_vis = copy.deepcopy(original_scene_pcd)
-    model_vis = copy.deepcopy(target_model_geometry) # This should be the original CAD model (mesh or PCD)
+def visualize_transformed_model_in_scene(scene_pcd, target_model_geometry, transform, window_name="Transformed Model in Scene"):
+    """
+    Visualize the transformed model in the original scene.
     
-    # Apply estimated_pose. Ensure model_vis is an Open3D geometry object before transform
-    if isinstance(model_vis, (np.ndarray, torch.Tensor)): # Should not happen if target_model_geometry is loaded correctly
-        print("Warning: target_model_geometry for scene viz is not an Open3D object. Attempting conversion.")
-        temp_geom = o3d.geometry.PointCloud()
-        if isinstance(model_vis, torch.Tensor): model_vis = model_vis.cpu().numpy()
-        temp_geom.points = o3d.utility.Vector3dVector(model_vis)
-        model_vis = temp_geom
-
-    model_vis.transform(estimated_pose) # estimated_pose is NumPy array
-
-    if not scene_vis.has_colors(): 
-        scene_vis.paint_uniform_color([0.2, 0.5, 0.8]) # New distinct color (e.g., a shade of blue)
-        print("  Applied default color to original scene for visualization.")
-
-    current_color = None
+    Args:
+        scene_pcd: Open3D point cloud of the original scene
+        target_model_geometry: Open3D geometry (point cloud or mesh) of the target model
+        transform: 4x4 transformation matrix
+        window_name: Name of the visualization window
+    """
+    # Create a copy of the scene point cloud to avoid modifying the original
+    scene_vis = o3d.geometry.PointCloud(scene_pcd)
+    
+    # Create a copy of the target model geometry
+    if isinstance(target_model_geometry, o3d.geometry.TriangleMesh):
+        model_vis = o3d.geometry.TriangleMesh(target_model_geometry)
+    else:
+        model_vis = o3d.geometry.PointCloud(target_model_geometry)
+    
+    # Apply the transformation to the model
+    model_vis.transform(transform)
+    
+    # Set colors for visualization
+    if not scene_vis.has_colors():
+        print("警告：原始场景点云没有颜色信息")
+        scene_vis.paint_uniform_color([0.7, 0.7, 0.7])  # 灰色
+    else:
+        print("使用原始场景点云的颜色信息")
+    
     if isinstance(model_vis, o3d.geometry.TriangleMesh):
-        if model_vis.has_vertex_colors(): current_color = np.asarray(model_vis.vertex_colors)[0] # Check if already colored
-        if current_color is None or np.all(current_color == current_color[0]): # If no color or uniform color
-             model_vis.paint_uniform_color([0, 1, 1]) # Green
-        if not model_vis.has_vertex_normals(): model_vis.compute_vertex_normals()
-    elif isinstance(model_vis, o3d.geometry.PointCloud):
-        if model_vis.has_colors(): current_color = np.asarray(model_vis.colors)[0]
-        if current_color is None or np.all(current_color == current_color[0]):
-            model_vis.paint_uniform_color([1, 1, 0]) # Green
-
-    print(f"\nDisplaying: {window_name}")
-    print("Scene Color (e.g., Gray/Original RGB): Original Full Scene | Model Color (e.g., Green): Transformed Target Model")
-    print("(Close the Open3D window to continue script execution...)")
-    geometries_to_draw = []
-    if scene_vis.has_points(): geometries_to_draw.append(scene_vis)
-    else: print(f"Warning: Original scene for '{window_name}' has no points.")
+        if not model_vis.has_vertex_colors():
+            print("警告：目标模型网格没有颜色信息")
+            model_vis.paint_uniform_color([1, 0, 0])  # 红色
+        else:
+            print("使用目标模型网格的颜色信息")
+    else:
+        if not model_vis.has_colors():
+            print("警告：目标模型点云没有颜色信息")
+            model_vis.paint_uniform_color([1, 0, 0])  # 红色
+        else:
+            print("使用目标模型点云的颜色信息")
     
-    if (isinstance(model_vis, o3d.geometry.TriangleMesh) and model_vis.has_vertices()) or \
-            (isinstance(model_vis, o3d.geometry.PointCloud) and model_vis.has_points()):
-        geometries_to_draw.append(model_vis)
-    else: print(f"Warning: Transformed model for '{window_name}' has no geometry, not drawing it.")
+    # Create visualization window
+    vis = o3d.visualization.Visualizer()
+    vis.create_window(window_name=window_name)
     
-    if len(geometries_to_draw) > 0:
-        try:
-            o3d.visualization.draw_geometries(geometries_to_draw, window_name=window_name, width=1280, height=960)
-            print(f"Visualization window '{window_name}' closed.")
-        except Exception as e:
-            print(f"Error during visualization of '{window_name}': {e}")
-    else: print(f"Not enough valid geometries to display for '{window_name}'.")
+    # Add geometries to the visualizer
+    vis.add_geometry(scene_vis)
+    vis.add_geometry(model_vis)
+    
+    # Set up the view
+    vis.get_render_option().point_size = 2
+    vis.get_render_option().background_color = np.array([0, 0, 0])
+    
+    # Run the visualizer
+    vis.run()
+    vis.destroy_window()
 
 # Namespace class to convert dict to object for args
 class ArgsNamespace:
