@@ -1,0 +1,17 @@
+RepeatabilityTest:
+  # 检测总次数
+  num_trials: 30
+  # 每次检测间隔（秒）
+  interval_sec: 1.0
+  # 目标类别名称（需与YOLO模型类别一致）
+  target_class: "boat"
+  # 结果输出目录
+  output_dir: "./repeatability_test_results"
+  # 前N次检测弹窗可视化
+  visualize_first_n: 0
+  # 检测结束后是否自动弹出结果折线图
+  show_plot: false
+  # YOLO模型路径
+  yolo_model: "yolov8m.pt"
+  # YOLO置信度阈值
+  yolo_conf_threshold: 0.3 
