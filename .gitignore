@@ -1,2 +1,31 @@
 /yolo_orchestrator_direct_to_part2_runs/
+
+# ������־�ļ�
+*.log
+# ������ʱ�ļ�
+*.tmp
+*.swp
+*.bak
+# ���Բ���ϵͳ���ɵ��ļ�
+.DS_Store
+Thumbs.db
+# ���Ա������ɵ��ļ�
+*.o
+*.obj
+*.class
+*.pyc
+*.pyo
+*.exe
+# ���������ļ���
+node_modules/
+vendor/
+__pycache__/
+# ���Ի����ļ�
+.env
+.env.local
+*.env
+# ���� IDE �ͱ༭�������ļ�
+.idea/
+.vscode/
+*.sublime-*
 /repeatability_test_results/
