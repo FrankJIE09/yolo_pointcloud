@@ -670,10 +670,120 @@ class InteractiveCameraEditor:
             final_pointcloud.points = o3d.utility.Vector3dVector(final_visible_points)
             final_pointcloud.paint_uniform_color([0, 1, 0])  # 绿色
             
-            # 保存结果
-            output_file = "custom_camera_pointcloud.ply"
-            o3d.io.write_point_cloud(output_file, final_pointcloud)
-            print(f"6. 保存到: {output_file}")
+            # 创建输出文件夹
+            import datetime
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            output_dir = f"output_pointclouds_{timestamp}"
+            os.makedirs(output_dir, exist_ok=True)
+            print(f"📁 创建输出文件夹: {output_dir}")
+            
+            # 保存多种格式的结果
+            print("6. 保存多种格式的点云文件...")
+            base_filename = os.path.join(output_dir, "custom_camera_pointcloud")
+            
+            # 支持的点云格式
+            formats = [
+                {"ext": ".ply", "desc": "PLY格式 (Stanford Polygon Library)"},
+                {"ext": ".pcd", "desc": "PCD格式 (Point Cloud Data)"},
+                {"ext": ".xyz", "desc": "XYZ格式 (ASCII坐标)"},
+                {"ext": ".pts", "desc": "PTS格式 (Points)"}
+            ]
+            
+            saved_files = []
+            for fmt in formats:
+                output_file = base_filename + fmt["ext"]
+                try:
+                    success = o3d.io.write_point_cloud(output_file, final_pointcloud)
+                    if success:
+                        file_size = os.path.getsize(output_file) / (1024 * 1024)  # MB
+                        print(f"   ✅ {fmt['desc']}: {output_file} ({file_size:.2f} MB)")
+                        saved_files.append(output_file)
+                    else:
+                        print(f"   ❌ 保存{fmt['desc']}失败")
+                except Exception as e:
+                    print(f"   ❌ 保存{fmt['desc']}时出错: {e}")
+            
+            # 尝试重建网格并保存为STL
+            print("   🔄 尝试重建网格并保存STL格式...")
+            try:
+                # 估计法向量
+                final_pointcloud.estimate_normals()
+                
+                # 使用泊松重建
+                mesh_poisson, _ = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
+                    final_pointcloud, depth=8
+                )
+                
+                # 保存STL网格
+                stl_file = base_filename + ".stl"
+                success = o3d.io.write_triangle_mesh(stl_file, mesh_poisson)
+                if success:
+                    file_size = os.path.getsize(stl_file) / (1024 * 1024)  # MB
+                    print(f"   ✅ STL格式 (重建网格): {stl_file} ({file_size:.2f} MB)")
+                    saved_files.append(stl_file)
+                else:
+                    print("   ❌ STL网格保存失败")
+                    
+            except Exception as e:
+                print(f"   ❌ STL网格重建失败: {e}")
+            
+            # 保存原始采样点云（对比用）
+            print("   💾 同时保存原始采样点云...")
+            original_cloud = o3d.geometry.PointCloud()
+            original_cloud.points = o3d.utility.Vector3dVector(sample_points)
+            original_cloud.paint_uniform_color([1, 0, 0])  # 红色
+            
+            original_base = os.path.join(output_dir, "original_sampled_pointcloud")
+            for fmt in formats[:2]:  # 只保存PLY和PCD格式
+                original_file = original_base + fmt["ext"]
+                try:
+                    success = o3d.io.write_point_cloud(original_file, original_cloud)
+                    if success:
+                        file_size = os.path.getsize(original_file) / (1024 * 1024)  # MB
+                        print(f"   📁 原始{fmt['desc']}: {original_file} ({file_size:.2f} MB)")
+                        saved_files.append(original_file)
+                except Exception as e:
+                    print(f"   ❌ 保存原始{fmt['desc']}时出错: {e}")
+            
+            # 保存相机配置
+            try:
+                config_file = os.path.join(output_dir, "camera_config.json")
+                self.config.save_config(config_file)
+                saved_files.append(config_file)
+                print(f"   📋 相机配置: {os.path.basename(config_file)}")
+            except Exception as e:
+                print(f"   ❌ 保存相机配置失败: {e}")
+            
+            # 生成README文件
+            try:
+                readme_file = os.path.join(output_dir, "README.txt")
+                with open(readme_file, 'w', encoding='utf-8') as f:
+                    f.write("=== 自定义相机视觉点云输出 ===\n\n")
+                    f.write(f"生成时间: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                    f.write(f"使用相机数: {len(self.config.cameras)}\n")
+                    f.write(f"初始采样点: {len(sample_points):,}\n")
+                    f.write(f"最终可见点: {len(final_visible_points):,} ({len(final_visible_points)/len(sample_points)*100:.1f}%)\n\n")
+                    
+                    f.write("相机配置:\n")
+                    for i, cam in enumerate(self.config.cameras, 1):
+                        f.write(f"  {i}. {cam['name']}\n")
+                        f.write(f"     位置: {cam['position']}\n")
+                        f.write(f"     朝向: {cam['look_at']}\n")
+                        f.write(f"     视场角: {cam['fov']}°\n\n")
+                    
+                    f.write("文件说明:\n")
+                    f.write("- custom_camera_pointcloud.*: 经过4个相机视觉过滤的点云\n")
+                    f.write("- original_sampled_pointcloud.*: 原始均匀采样点云（对比用）\n")
+                    f.write("- camera_config.json: 相机配置文件\n")
+                    if any('.stl' in f for f in saved_files):
+                        f.write("- custom_camera_pointcloud.stl: 重建的网格模型\n")
+                
+                saved_files.append(readme_file)
+                print(f"   📄 说明文档: {os.path.basename(readme_file)}")
+            except Exception as e:
+                print(f"   ❌ 生成README失败: {e}")
+            
+            print(f"\n📂 共保存了 {len(saved_files)} 个文件到文件夹: {output_dir}")
             
             # 可视化结果
             print("7. 可视化结果...")
@@ -700,8 +810,21 @@ class InteractiveCameraEditor:
                                             window_name="对比显示: 红=原始 vs 绿=视觉可见",
                                             width=1200, height=800)
             
+            # 显示所有保存的文件列表
+            for i, file in enumerate(saved_files, 1):
+                file_size = os.path.getsize(file) / (1024 * 1024)  # MB
+                print(f"   {i}. {file} ({file_size:.2f} MB)")
+            
             print("=== 自定义相机点云生成完成 ===\n")
-            messagebox.showinfo("完成", f"点云生成完成！\n使用了 {len(self.config.cameras)} 个相机\n输出文件: {output_file}")
+            
+            # 准备消息框内容
+            file_list = "\n".join([f"• {os.path.basename(f)}" for f in saved_files])
+            messagebox.showinfo("完成", 
+                f"点云生成完成！\n"
+                f"使用了 {len(self.config.cameras)} 个相机\n"
+                f"最终可见点: {len(final_visible_points):,} 个\n\n"
+                f"输出文件夹: {output_dir}\n"
+                f"保存的文件 ({len(saved_files)} 个):\n{file_list}")
             
         except Exception as e:
             print(f"❌ 生成点云时出错: {e}")
